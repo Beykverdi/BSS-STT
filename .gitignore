@@ -1,0 +1,54 @@
+# dependencies
+node_modules
+
+# build
+dist
+dist-ssr
+*.local
+
+#logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# env
+.env
+.env.*
+!.env.example
+
+# vite
+.vite
+
+# coverage
+coverage
+
+# cache
+.cache
+
+# mac
+.DS_Store
+
+# windows
+Thumbs.db
+
+# supabase local
+.supabase
+
+# temp
+tmp
+temp
+
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+
