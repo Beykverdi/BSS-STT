@@ -15,7 +15,7 @@ export class WhisperTranscriptionService {
 
     formData.append(
       'language',
-      language
+      language.split('-')[0]
     );
 
     const { data, error } =
@@ -28,6 +28,12 @@ export class WhisperTranscriptionService {
 
     if (error) {
       throw error;
+    }
+
+    if (!data?.text) {
+      throw new Error(
+        'Invalid transcription response'
+      );
     }
 
     return data.text;
