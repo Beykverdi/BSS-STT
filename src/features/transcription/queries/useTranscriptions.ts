@@ -4,20 +4,53 @@ import { useQuery, useMutation, useQueryClient, useInfiniteQuery } from '@tansta
 import { supabase } from '../../../lib/supabase';
 import type { Transcription } from '../../../types';
 import type { AppError } from '../../../shared/errors';
-import { parseError, DatabaseError, ErrorCode } from '../../../shared/errors';
+import { DatabaseError, ErrorCode } from '../../../shared/errors';
 
-// Query keys
+/**
+ * Query Keys (stable & production-safe)
+ */
 export const transcriptionKeys = {
   all: ['transcriptions'] as const,
+
   lists: () => [...transcriptionKeys.all, 'list'] as const,
-  list: (filters: Record<string, any>) => [...transcriptionKeys.lists(), filters] as const,
+
+  list: (filters?: {
+    folderId?: string;
+    language?: string;
+    limit?: number;
+  }) =>
+    [
+      ...transcriptionKeys.lists(),
+      filters?.folderId ?? 'all',
+      filters?.language ?? 'all',
+      filters?.limit ?? 20,
+    ] as const,
+
   details: () => [...transcriptionKeys.all, 'detail'] as const,
   detail: (id: string) => [...transcriptionKeys.details(), id] as const,
+
   stats: () => [...transcriptionKeys.all, 'stats'] as const,
-  search: (query: string) => [...transcriptionKeys.all, 'search', query] as const,
+
+  search: (query: string) =>
+    [
+      ...transcriptionKeys.all,
+      'search',
+      query.trim().toLowerCase(),
+    ] as const,
 };
 
-// Fetch transcriptions with cursor pagination
+/**
+ * Cached user getter (prevents auth spam)
+ */
+async function requireUser() {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('Not authenticated');
+  return user;
+}
+
+/**
+ * Infinite list with stable cursor pagination
+ */
 export function useTranscriptions(options?: {
   limit?: number;
   folderId?: string;
@@ -26,10 +59,10 @@ export function useTranscriptions(options?: {
   const limit = options?.limit ?? 20;
 
   return useInfiniteQuery({
-    queryKey: transcriptionKeys.list(options || {}),
+    queryKey: transcriptionKeys.list(options),
+
     queryFn: async ({ pageParam }) => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error('Not authenticated');
+      const user = await requireUser();
 
       let query = supabase
         .from('transcriptions')
@@ -47,7 +80,6 @@ export function useTranscriptions(options?: {
         query = query.eq('language', options.language);
       }
 
-      // Cursor pagination
       if (pageParam) {
         query = query.lt('created_at', pageParam);
       }
@@ -64,22 +96,35 @@ export function useTranscriptions(options?: {
 
       return data as Transcription[];
     },
+
     initialPageParam: null as string | null,
+
     getNextPageParam: (lastPage) => {
-      if (lastPage.length < limit) return null;
-      const lastItem = lastPage[lastPage.length - 1];
-      return lastItem?.created_at || null;
+      if (!lastPage || lastPage.length < limit) return null;
+
+      const last = lastPage[lastPage.length - 1];
+
+      return last?.created_at
+        ? new Date(last.created_at).toISOString()
+        : null;
     },
+
+    staleTime: 60_000,
+    gcTime: 5 * 60_000,
+    retry: 2,
+    refetchOnWindowFocus: false,
   });
 }
 
-// Fetch single transcription
+/**
+ * Single transcription
+ */
 export function useTranscription(id: string) {
   return useQuery({
     queryKey: transcriptionKeys.detail(id),
+
     queryFn: async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error('Not authenticated');
+      const user = await requireUser();
 
       const { data, error } = await supabase
         .from('transcriptions')
@@ -99,11 +144,17 @@ export function useTranscription(id: string) {
 
       return data as Transcription;
     },
+
     enabled: !!id,
+
+    staleTime: 60_000,
+    retry: 2,
   });
 }
 
-// Create transcription mutation
+/**
+ * Create transcription
+ */
 export function useCreateTranscription() {
   const queryClient = useQueryClient();
 
@@ -118,8 +169,7 @@ export function useCreateTranscription() {
       audio_mime_type?: string;
       folder_id?: string;
     }) => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error('Not authenticated');
+      const user = await requireUser();
 
       const { data, error } = await supabase
         .from('transcriptions')
@@ -141,21 +191,31 @@ export function useCreateTranscription() {
 
       return data as Transcription;
     },
+
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: transcriptionKeys.lists() });
-      queryClient.invalidateQueries({ queryKey: transcriptionKeys.stats() });
+      queryClient.invalidateQueries({ queryKey: transcriptionKeys.all });
     },
+
+    retry: 2,
+    retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 8000),
   });
 }
 
-// Update transcription mutation
+/**
+ * Update transcription
+ */
 export function useUpdateTranscription() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async ({ id, updates }: { id: string; updates: Partial<Transcription> }) => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error('Not authenticated');
+    mutationFn: async ({
+      id,
+      updates,
+    }: {
+      id: string;
+      updates: Partial<Transcription>;
+    }) => {
+      const user = await requireUser();
 
       const { data, error } = await supabase
         .from('transcriptions')
@@ -175,21 +235,24 @@ export function useUpdateTranscription() {
 
       return data as Transcription;
     },
+
     onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: transcriptionKeys.detail(data.id) });
-      queryClient.invalidateQueries({ queryKey: transcriptionKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: transcriptionKeys.all });
     },
+
+    retry: 2,
   });
 }
 
-// Delete transcription mutation (soft delete)
+/**
+ * Soft delete
+ */
 export function useDeleteTranscription() {
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: async (id: string) => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error('Not authenticated');
+      const user = await requireUser();
 
       const { error } = await supabase
         .from('transcriptions')
@@ -207,10 +270,11 @@ export function useDeleteTranscription() {
 
       return id;
     },
-    onSuccess: (id) => {
-      queryClient.invalidateQueries({ queryKey: transcriptionKeys.detail(id) });
-      queryClient.invalidateQueries({ queryKey: transcriptionKeys.lists() });
-      queryClient.invalidateQueries({ queryKey: transcriptionKeys.stats() });
+
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: transcriptionKeys.all });
     },
+
+    retry: 2,
   });
 }

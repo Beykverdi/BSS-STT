@@ -1,7 +1,6 @@
-// Search Transcriptions - Full-text search with debouncing
+// Search Transcriptions - Full-text search (safe & production-ready)
 
 import { useQuery } from '@tanstack/react-query';
-import React from 'react';
 import { supabase } from '../../../lib/supabase';
 import type { Transcription } from '../../../types';
 import { transcriptionKeys } from './useTranscriptions';
@@ -9,80 +8,57 @@ import { DatabaseError, ErrorCode } from '../../../shared/errors';
 
 export interface SearchResult extends Transcription {
   rank?: number;
-  headline?: string; // Highlighted snippet
+  headline?: string;
 }
 
-export function useSearchTranscriptions(query: string, options?: { enabled?: boolean }) {
-  const debouncedQuery = useDebounce(query, 300);
+/**
+ * Safe search hook (NO debounce inside)
+ */
+export function useSearchTranscriptions(
+  query: string,
+  options?: { enabled?: boolean }
+) {
+  const normalizedQuery = query.trim().toLowerCase();
 
   return useQuery({
-    queryKey: transcriptionKeys.search(debouncedQuery || ''),
+    queryKey: transcriptionKeys.search(normalizedQuery),
+
     queryFn: async (): Promise<SearchResult[]> => {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('Not authenticated');
 
-      if (!debouncedQuery || debouncedQuery.trim().length === 0) {
-        return [];
-      }
+      if (!normalizedQuery) return [];
 
-      const searchTerms = debouncedQuery.trim().split(/\s+/).join(' | ');
+      const sanitized = normalizedQuery.replace(/[^\w\s]/g, '');
 
-      // Use PostgreSQL full-text search
       const { data, error } = await supabase
         .from('transcriptions')
-        .select(`
-          *,
-          rank: ts_rank_cd(search_vector, to_tsquery('simple', '${searchTerms}'))
-        `)
+        .select('*')
         .eq('user_id', user.id)
         .eq('is_deleted', false)
-        .textSearch('search_vector', searchTerms, {
-          type: 'websearch',
-          config: 'simple',
-        })
-        .order('rank', { ascending: false })
+        .or(
+          `content.ilike.%${sanitized}%,title.ilike.%${sanitized}%`
+        )
+        .order('created_at', { ascending: false })
         .limit(50);
 
       if (error) {
-        // Fallback to simple LIKE search if full-text fails
-        const { data: fallbackData, error: fallbackError } = await supabase
-          .from('transcriptions')
-          .select('*')
-          .eq('user_id', user.id)
-          .eq('is_deleted', false)
-          .or(`content.ilike.%${debouncedQuery}%,title.ilike.%${debouncedQuery}%`)
-          .order('created_at', { ascending: false })
-          .limit(50);
-
-        if (fallbackError) {
-          throw new DatabaseError(
-            ErrorCode.DATABASE_QUERY_FAILED,
-            fallbackError.message,
-            fallbackError
-          );
-        }
-
-        return (fallbackData || []) as SearchResult[];
+        throw new DatabaseError(
+          ErrorCode.DATABASE_QUERY_FAILED,
+          error.message,
+          error
+        );
       }
 
       return (data || []) as SearchResult[];
     },
-    enabled: options?.enabled !== false && !!debouncedQuery && debouncedQuery.trim().length > 0,
-    staleTime: 30 * 1000, // 30 seconds for search results
+
+    enabled:
+      options?.enabled !== false &&
+      normalizedQuery.length > 0,
+
+    staleTime: 30_000,
+    retry: 2,
+    refetchOnWindowFocus: false,
   });
-}
-
-// Debounce hook
-function useDebounce(value: string, delay: number): string {
-  const [debouncedValue, setDebouncedValue] = React.useState(value);
-
-  React.useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedValue(value);
-    }, delay);
-
-    return () => clearTimeout(timer);
-  }, [value, delay]);
-
-  return debouncedValue;
 }
